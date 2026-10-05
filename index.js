@@ -169,9 +169,17 @@ function retryFetch(fetchFn, opts) {
 // ── Rich stream labels (shared module) ──
 var streamLabels = (function(){try{return (null)}catch(e){return null}})();
 var buildStreamLabel = streamLabels ? streamLabels.buildStreamLabel : function(s, pn) {
-  var q = s.quality || 'HD', server = s.serverName || s.serverLabel || s.servername || '';
-  var lang = s.lang || s.language || s.audio || 'Latino', isReal = s.isReal === true;
-  return { name: pn + ' - ' + q + (isReal ? ' ✅' : ''), title: lang + ' - ' + server, quality: q, _resWeight: 0, _sizeWeight: 0 };
+  var q = s.quality || 'HD', server = s.serverName || s.serverLabel || s.servername || s.provider || '';
+  // IMPORTANT: resolvers set `Audio` (capital A). Also accept lang/language/audio.
+  var lang = s.lang || s.language || s.Audio || s.audio || s.langLabel || 'Latino';
+  var isReal = s.isReal === true;
+  return {
+    name: pn + ' - ' + q + (isReal ? ' ✅' : ''),
+    title: lang + ' - ' + server,
+    quality: q,
+    _resWeight: 0,
+    _sizeWeight: 0
+  };
 };
 
 // src/utils/ua.js
@@ -708,18 +716,19 @@ var require_engine = __commonJS({
     var { sortStreamsByQuality: sortStreamsByQuality2 } = (init_sorting(), __toCommonJS(sorting_exports));
     var { isMirror: isMirror2 } = require_mirrors();
     function normalizeLanguage(lang) {
-      const l = (lang || "").toLowerCase();
-      if (l.includes("latino") || l === "lat" || l.includes("mex") || l.includes("col") || l.includes("arg") || l.includes("chi") || l.includes("per") || l.includes("dub") || l.includes("dual")) {
+      const l = (lang || "").toLowerCase().trim();
+      if (!l) return "Latino";
+      if (l === "lat" || l === "latino" || l.includes("latino") || l.includes("mex") || l.includes("col") || l.includes("arg") || l.includes("chi") || l.includes("per") || l.includes("dub") || l.includes("dual") || l === "es-mx" || l === "es-419") {
         return "Latino";
       }
-      if (l.includes("esp") || l.includes("cas") || l.includes("spa") || l.includes("cast") || l === "espa\xF1ol") {
+      if (l === "esp" || l === "cas" || l.includes("castellano") || l.includes("espa") || l.includes("cast") || l === "es-es" || l === "spa" || l === "spanish") {
         return "Castellano";
       }
-      if (l.includes("sub") || l.includes("vose") || l === "sub") {
+      if (l === "sub" || l.includes("sub") || l.includes("vose") || l.includes("subtit")) {
         return "Subtitulado";
       }
-      if (l.includes("eng") || l.includes("en-us") || l === "en") {
-        return "Ingl\xE9s";
+      if (l.includes("eng") || l === "en" || l === "en-us" || l.includes("ingl") || l === "english") {
+        return "Inglés";
       }
       return "Latino";
     }
@@ -795,22 +804,48 @@ var require_engine = __commonJS({
         for (const s of validatedStreams) {
           if (!s)
             continue;
-          const rawLang = normalizeLanguage(s.lang || s.Audio || s.langLabel || s.language || s.audio || "Latino");
+          // Resolve language from every possible field resolvers may set
+          const rawLang = normalizeLanguage(
+            s.lang || s.Audio || s.langLabel || s.language || s.audio || "Latino"
+          );
           const l = rawLang.toLowerCase();
-          const isAllowed = l === "latino" || l === "castellano";
+          // Allow Latino, Castellano and Subtitulado so the app can filter by language
+          const isAllowed =
+            l === "latino" ||
+            l === "castellano" ||
+            l === "subtitulado" ||
+            l === "inglés" ||
+            l === "ingles";
           if (!isAllowed && providerName !== "FuegoCine")
             continue;
-          const server = normalizeServer(s.serverLabel || s.serverName || s.servername, s.url, s.serverName);
+
+          const server = normalizeServer(
+            s.serverLabel || s.serverName || s.servername,
+            s.url,
+            s.serverName
+          );
           const quality = s.quality || "HD";
           const isReal = s.isReal === true;
           const isVerified = s.verified === true;
+
+          // Stamp language onto the stream BEFORE building labels so buildStreamLabel sees it
+          s.lang = rawLang;
+          s.language = rawLang;
+          s.Audio = rawLang;
+          s.audio = rawLang;
+          s.serverLabel = server;
+          s.serverName = s.serverName || server;
+
           var labelInfo = buildStreamLabel(s, providerName);
           const streamName = labelInfo.name;
-          const streamTitle = labelInfo.title;
+          // Title always carries language + server so the app UI can read it
+          const streamTitle = rawLang + " - " + server;
           const labelQuality = labelInfo.quality || quality;
-          if (seenTitles.has(streamName + streamTitle + s.url))
+          const dedupeKey = streamName + "|" + streamTitle + "|" + s.url;
+          if (seenTitles.has(dedupeKey))
             continue;
-          seenTitles.add(streamName + streamTitle + s.url);
+          seenTitles.add(dedupeKey);
+
           processed.push({
             name: streamName,
             title: streamTitle,
@@ -821,7 +856,11 @@ var require_engine = __commonJS({
             verified: isVerified,
             isReal,
             provider: server,
+            // Explicit language fields for the app / page / servers
             language: rawLang,
+            lang: rawLang,
+            audio: rawLang,
+            Audio: rawLang,
             headers: s.headers || {
               "User-Agent": "Mozilla/5.0 (Linux; Android 10; TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
@@ -1591,7 +1630,14 @@ function getStreams(tmdbId, mediaType, season, episode, title, year) {
             resolveEmbedLocal(task.url, task.hint).then((res) => {
               if (!res)
                 return null;
-              return __spreadProps(__spreadValues({}, res), { Audio: task.lang, serverLabel: task.server });
+              return __spreadProps(__spreadValues({}, res), {
+                Audio: task.lang,
+                audio: task.lang,
+                lang: task.lang,
+                language: task.lang,
+                serverLabel: task.server,
+                serverName: task.server
+              });
             }),
             new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), INDIVIDUAL_TIMEOUT))
           ]).catch(() => null);
